@@ -26,7 +26,7 @@ st.set_page_config(page_title="WBC BrewBot", layout="wide")
 try:
     # Configure Gemini API
     genai.configure(api_key=os.environ["GEMINI_KEY"])
-    GEMINI_MODEL = genai.GenerativeModel("gemini-1.5-flash")
+    GEMINI_MODEL = genai.GenerativeModel("gemini-2.0-flash-lite")
 
     # Initialize Supabase client
     supabase_url = os.environ["SUPABASE_URL"]
@@ -94,6 +94,8 @@ Standalone Question:"""
         return last_user_question # Fallback to the original question
 
 
+# chatbot.py
+
 def call_gemini(messages: list, context: str = "") -> str:
     """Generates a response from the Gemini model with optional context."""
     system_prompt = (
@@ -117,7 +119,17 @@ def call_gemini(messages: list, context: str = "") -> str:
 
     try:
         response = GEMINI_MODEL.generate_content(gemini_messages)
-        return response.text
+        
+        # --- START OF MODIFICATION ---
+        # Add a safety check to ensure the response has content before accessing it.
+        # This prevents a crash if the API returns an empty response due to safety filters.
+        if response.parts:
+            return response.text
+        else:
+            # If the response is empty, return a user-friendly message instead of crashing.
+            return "I'm sorry, I can't answer that question. Could you please try rephrasing it?"
+        # --- END OF MODIFICATION ---
+
     except Exception as e:
         print(f"Error calling Gemini: {e}")
         return "I'm sorry, I encountered an error while processing your request."
