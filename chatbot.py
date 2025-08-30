@@ -1,300 +1,240 @@
 # chatbot.py
 import streamlit as st
 import os
-import re
 from dotenv import load_dotenv
-
-# Pinecone
-from pinecone import Pinecone
-from langchain_pinecone import PineconeVectorStore
-
-# LangChain
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-
-# Gemini API
-import google.generativeai as genai
-
-# Supabase
-from supabase import create_client, Client
 
 # --- Initialization ---
 load_dotenv()
 st.set_page_config(page_title="WBC BrewBot", layout="wide")
 
+# LangChain Imports
+from langchain_community.utilities import SQLDatabase
+from langchain_community.agent_toolkits import create_sql_agent
+from langchain.agents import AgentExecutor, create_react_agent, tool
+# DEPRECATED: from langchain.tools.retriever import create_retriever_tool
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+# Pinecone
+from pinecone import Pinecone
+from langchain_pinecone import PineconeVectorStore
+from langchain_huggingface import HuggingFaceEmbeddings
+
 # --- API Clients & Model Configuration ---
 try:
-    # Configure Gemini API
-    genai.configure(api_key=os.environ["GEMINI_KEY"])
-    GEMINI_MODEL = genai.GenerativeModel("gemini-2.0-flash-lite")
+    # Initialize LLM
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, google_api_key=os.environ["GEMINI_API_KEY"])
 
-    # Initialize Supabase client
-    supabase_url = os.environ["SUPABASE_URL"]
-    supabase_key = os.environ["SUPABASE_API_KEY"]
-    SUPABASE_CLIENT: Client = create_client(supabase_url, supabase_key)
-
-    # Initialize Pinecone
-    pc = Pinecone(api_key=os.environ["PINECONE-API-KEY"])
-    index_name = os.environ["PINECONE-INDEX-NAME"]
+    # Initialize Pinecone & Vector Store
+    pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
+    index_name = os.environ["PINECONE_INDEX_NAME"]
     index = pc.Index(index_name)
+    embeddings = HuggingFaceEmbeddings(model_name="intfloat/e5-base")
+    vector_store = PineconeVectorStore(index=index, embedding=embeddings)
 
-    # Initialize embeddings & vector store
-    EMBEDDINGS = HuggingFaceEmbeddings(model_name="intfloat/e5-base")
-    VECTOR_STORE = PineconeVectorStore(index=index, embedding=EMBEDDINGS)
+    # Provide a custom description for the 'drinks' table to give the SQL agent context.
+    custom_table_info = {
+        "drinks": """
+        This table contains a complete list of all beverages.
+        - To filter by type (e.g., beers, ciders), use the 'type' column.
+        - To filter by style (e.g. IPA, Stout), use the 'style' column with a case-insensitive match (ILIKE).
+        """
+    }
+    
+    # Initialize Supabase Connection for SQL Agent with the custom table info
+    db_uri = (
+        f"postgresql://{os.environ['SUPABASE_DB_USER']}:{os.environ['SUPABASE_DB_PASSWORD']}"
+        f"@{os.environ['SUPABASE_DB_HOST']}:{os.environ['SUPABASE_DB_PORT']}/{os.environ['SUPABASE_DB_NAME']}"
+    )
+    db = SQLDatabase.from_uri(db_uri, custom_table_info=custom_table_info)
 
 except (KeyError, Exception) as e:
-    st.error(f"Failed to initialize one or more services. Please check your .env file and API keys. Error: {e}")
+    st.error(f"Failed to initialize one or more services. Please check your .env file and API keys, especially the SUPABASE_DB_* variables for the SQL agent. Error: {e}")
     st.stop()
 
 
-# --- Helper Functions ---
+# --- 1. DEFINE TOOLS ---
 
-def rewrite_query_with_history(messages: list) -> str:
+# --- NEW: Helper function to format retrieved documents ---
+def format_docs_with_metadata(docs: list[Document]) -> str:
     """
-    Uses an LLM to rewrite the user's latest query to be self-contained,
-    incorporating context from the chat history. This is a robust way to
-    handle conversational follow-up questions.
+    Formats a list of documents, including their metadata, into a single string.
     """
-    if not messages:
-        return ""
-    if len(messages) == 1:
-        return messages[0].content
+    formatted_docs = []
+    for i, doc in enumerate(docs):
+        # Start with the main description
+        content = f"Result {i+1}:\nDescription: {doc.page_content}\n"
+        
+        # Add metadata in a clean, readable format
+        meta_info = []
+        if 'name' in doc.metadata:
+            meta_info.append(f"Name: {doc.metadata['name']}")
+        if 'type' in doc.metadata:
+            meta_info.append(f"Type: {doc.metadata['type']}")
+        if 'style' in doc.metadata:
+            meta_info.append(f"Style: {doc.metadata['style']}")
+        if 'abv' in doc.metadata:
+            meta_info.append(f"ABV: {doc.metadata['abv']}")
+        if 'ibu' in doc.metadata:
+            meta_info.append(f"IBU: {doc.metadata['ibu']}")
+        
+        if meta_info:
+            content += "Details: " + " | ".join(meta_info)
 
-    formatted_history = ""
-    # Format all messages except the very last one (the user's current question)
-    for msg in messages[:-1]:
-        role = "Human" if isinstance(msg, HumanMessage) else "AI"
-        formatted_history += f"{role}: {msg.content}\n"
-    
-    last_user_question = messages[-1].content
-
-    # --- START OF MODIFICATION: More specific instructions for the LLM ---
-    # This new prompt explicitly tells the model how to handle general vs. specific questions,
-    # preventing it from incorrectly narrowing the user's intent.
-    rewrite_prompt = f"""Given the following chat history and a final user question, rewrite the user's question to be a single, standalone question.
-
-Follow these strict rules:
-1.  If the user's question is a follow-up that uses pronouns (e.g., "what is its ABV?", "tell me more about those"), incorporate the specific subjects from the chat history (e.g., "what is the ABV of Killer Lite?", "tell me more about the gluten-free options").
-2.  If the user's question is a new, general question (e.g., "what drink has the highest ABV?", "what are your hours?"), return it exactly as is. Do not add context from the history.
-3.  **Crucially, do not add restrictive keywords (like 'beer' or 'cider') to a general keyword (like 'drink')** unless the user's *latest* question uses a pronoun or is clearly a follow-up.
-4.  Your output must only be the rewritten question and nothing else.
-
-Chat History:
-{formatted_history}
-Final User Question: {last_user_question}
-
-Standalone Question:"""
-    # --- END OF MODIFICATION ---
-
-    try:
-        response = GEMINI_MODEL.generate_content(rewrite_prompt)
-        return response.text.strip() if response.parts else last_user_question
-    except Exception as e:
-        print(f"Error during query rewriting: {e}")
-        return last_user_question # Fallback to the original question
+        formatted_docs.append(content)
+        
+    return "\n---\n".join(formatted_docs)
 
 
-# chatbot.py
-
-def call_gemini(messages: list, context: str = "") -> str:
-    """Generates a response from the Gemini model with optional context."""
-    system_prompt = (
-        "You are a helpful and friendly assistant for the Wellsville Brewing Company. "
-        "Use the following pieces of context to answer the question. "
-        "The context may include 'Facts' from a database and 'Semantic Context' from documents. "
-        "If the 'Facts' section provides a direct answer, prioritize it. "
-        "When the context provides specific data like ABV or IBU values, you MUST include them in your answer. "
-        "Keep the answer concise and conversational. If you don't know the answer from the context, just say so."
+# --- NEW: Consolidated Semantic Search Tool ---
+@tool
+def semantic_brewery_search(query: str) -> str:
+    """
+    Use this tool to search for general, descriptive information about the brewery, 
+    its history, hours, location, atmosphere, and specific drinks when a precise database query is not possible.
+    This tool is excellent for questions based on flavors, textures, or feelings like 'what is a good summer beer?' 
+    or 'tell me about the brewery'. It should be used as a fallback if the drink_database_tool finds no results.
+    """
+    st.sidebar.info("Used Semantic Search for a descriptive answer.")
+    retriever = vector_store.as_retriever(
+        search_type="similarity_score_threshold",
+        search_kwargs={"k": 3, "score_threshold": 0.5}, # Lowered threshold slightly for broader concepts
     )
-
-    gemini_messages = [{"role": "user", "parts": [system_prompt]}]
-    if context:
-        gemini_messages[0]["parts"].append(f"\nContext:\n{context}")
+    docs = retriever.invoke(query)
+    if not docs:
+        return "No relevant information found in the brewery's general information."
     
-    gemini_messages.append({"role": "model", "parts": ["Understood. I will act as the Wellsville Brewing Company assistant and use the provided context to answer questions."]})
+    # Use the new formatting function to include metadata
+    return format_docs_with_metadata(docs)
 
-    for message in messages:
-        role = "user" if isinstance(message, HumanMessage) else "model"
-        gemini_messages.append({"role": role, "parts": [message.content]})
 
+# SQL Agent for structured data queries
+sql_agent_executor = create_sql_agent(
+    llm=llm,
+    db=db,
+    agent_type="openai-tools",
+    verbose=True,
+    handle_parsing_errors=True,
+    max_iterations=5
+)
+
+# --- REVISED: Hybrid Tool with Fallback to the NEW Semantic Tool ---
+@tool
+def drink_database_tool(query: str) -> str:
+    """
+    Use this primary tool for ANY question that requires finding, listing, counting, ranking, or filtering 
+    the brewery's drinks based on specific criteria like ABV, IBU, style, or type.
+    For example: 'What is the strongest beer?', 'Do you have any IPAs?', 'How many ciders are there?'
+    This tool is NOT for subjective recommendations (e.g., 'what tastes good?').
+    If this tool returns an empty or "no results" answer, you MUST use the `semantic_brewery_search` tool as a fallback.
+    """
+    # First, try the precise SQL search
     try:
-        response = GEMINI_MODEL.generate_content(gemini_messages)
+        st.sidebar.info("Attempting a precise database search (SQL)...")
+        sql_result = sql_agent_executor.invoke({"input": query})
+        output = sql_result.get("output", "")
+
+        # Define negative keywords that indicate an empty but valid SQL response
+        negative_keywords = [
+            "no results", "no drinks", "no beers", "no ciders",
+            "are no", "are not any", "don't have any", "do not have any",
+            "doesn't have", "does not have"
+        ]
         
-        # --- START OF MODIFICATION ---
-        # Add a safety check to ensure the response has content before accessing it.
-        # This prevents a crash if the API returns an empty response due to safety filters.
-        if response.parts:
-            return response.text
+        # Check if the output is meaningful. If it's empty, just says "[]", or contains a negative keyword, it's not useful.
+        is_meaningful = output and "[]" not in output and not any(kw in output.lower() for kw in negative_keywords)
+
+        if is_meaningful:
+            st.sidebar.success("SQL Tool found a definitive answer.")
+            return output
         else:
-            # If the response is empty, return a user-friendly message instead of crashing.
-            return "I'm sorry, I can't answer that question. Could you please try rephrasing it?"
-        # --- END OF MODIFICATION ---
+            # If SQL returns no results, explicitly state this so the agent knows to fallback.
+            st.sidebar.warning("SQL did not find a definitive answer.")
+            return "No definitive results were found in the drink database. Try a different search."
 
     except Exception as e:
-        print(f"Error calling Gemini: {e}")
-        return "I'm sorry, I encountered an error while processing your request."
+        print(f"SQL Agent failed. Error: {e}")
+        return "The drink database could not be searched due to an error."
 
 
-def query_supabase(prompt: str) -> str | None:
-    """
-    Queries the Supabase database for structured information based on a standalone prompt.
-    """
-    prompt_lower = prompt.lower()
+# --- 2. CREATE SUPERVISOR AGENT ---
 
-    drink_type_filter = None
-    if "beer" in prompt_lower: drink_type_filter = "beer"
-    elif "cider" in prompt_lower: drink_type_filter = "cider"
-    elif "seltzer" in prompt_lower: drink_type_filter = "seltzer"
+# Define the list of tools the supervisor can use
+tools = [drink_database_tool, semantic_brewery_search]
 
-    # --- Ranking Queries ---
-    if any(word in prompt_lower for word in ["rank", "list", "order", "sort", "top", "most"]):
-        limit_match = re.search(r'(\d+)', prompt_lower)
-        limit = int(limit_match.group(1)) if limit_match else None
+# Define the supervisor's prompt template
+supervisor_prompt_template = """
+You are a helpful and friendly assistant for the Wellsville Brewing Company named 'BrewBot'.
+Your primary goal is to provide accurate information from the brewery's database and documents.
+Answer the user's questions as best as possible. You have access to the following tools:
 
-        if "abv" in prompt_lower or "alcohol" in prompt_lower:
-            query = SUPABASE_CLIENT.table("drinks").select("name, abv, type")
-            if drink_type_filter: query = query.eq("type", drink_type_filter)
-            
-            is_ascending = any(word in prompt_lower for word in ["lowest", "ascending", "weakest"])
-            query = query.order("abv", desc=not is_ascending)
-            order_desc = "lowest to highest" if is_ascending else "highest to lowest"
-            if limit: query = query.limit(limit)
-            
-            response = query.execute()
-            if response.data:
-                ranked_list = "\n".join([f"- {d['name']} ({d['abv']}% ABV)" for d in response.data])
-                return f"Fact: Here are the drinks ranked by ABV ({order_desc}):\n{ranked_list}"
+{tools}
 
-        if "ibu" in prompt_lower or "bitter" in prompt_lower:
-            query = SUPABASE_CLIENT.table("drinks").select("name, ibu").eq("type", "beer").not_.is_("ibu", "null")
-            is_ascending = any(word in prompt_lower for word in ["lowest", "least bitter", "ascending"])
-            query = query.order("ibu", desc=not is_ascending)
-            order_desc = "least to most bitter" if is_ascending else "most to least bitter"
-            if limit: query = query.limit(limit)
+**IMPORTANT USAGE INSTRUCTIONS:**
+1. For questions about listing, counting, or filtering drinks (e.g., "how many IPAs", "strongest beer", "list all ciders"), you MUST use the `drink_database_tool` first.
+2. If the `drink_database_tool` returns an empty or "no results" answer, you MUST then use the `semantic_brewery_search` tool with the same query to find descriptive information as a fallback.
+3. For general questions about the brewery, its hours, history, or for subjective recommendations (e.g., "what's a good summer beer?"), you should use the `semantic_brewery_search` tool directly.
 
-            response = query.execute()
-            if response.data:
-                ranked_list = "\n".join([f"- {d['name']} ({d['ibu']} IBU)" for d in response.data])
-                return f"Fact: Here are the beers ranked by IBU ({order_desc}):\n{ranked_list}"
+Use the following format to answer the question:
 
-    # --- Specific Fact Queries ---
-    if any(word in prompt_lower for word in ["highest abv", "strongest", "most alcohol"]):
-        query = SUPABASE_CLIENT.table("drinks").select("name, abv, type").order("abv", desc=True).limit(1)
-        if drink_type_filter: query = query.eq("type", drink_type_filter)
-        response = query.execute()
-        if response.data:
-            drink = response.data[0]
-            return f"Fact: The {drink['type']} with the highest ABV is {drink['name']} at {drink['abv']}%."
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer OR I need to ask the user for more information.
+Final Answer: The final answer to the original input question OR a clarifying question to the user.
 
-    if any(word in prompt_lower for word in ["lowest abv", "weakest", "least alcohol"]):
-        query = SUPABASE_CLIENT.table("drinks").select("name, abv, type").order("abv", desc=False).limit(1)
-        if drink_type_filter: query = query.eq("type", drink_type_filter)
-        response = query.execute()
-        if response.data:
-            drink = response.data[0]
-            return f"Fact: The {drink['type']} with the lowest ABV is {drink['name']} at {drink['abv']}%."
-    
-    if "gluten free" in prompt_lower or "gluten-free" in prompt_lower:
-        response = SUPABASE_CLIENT.table("drinks").select("name, type").eq("gluten_free", True).execute()
-        if response.data:
-            names = ', '.join([f"{d['name']} ({d['type']})" for d in response.data])
-            return f"Fact: Gluten-free options are: {names}."
-        return "Fact: There are no gluten-free options available."
+Begin!
 
-    if any(p in prompt_lower for p in ["all drinks", "what do you have", "list all"]):
-        query = SUPABASE_CLIENT.table("drinks").select("name, type, abv")
-        if drink_type_filter: query = query.eq("type", drink_type_filter)
-        response = query.execute()
-        if response.data:
-            drinks_by_type = {}
-            for drink in response.data:
-                drinks_by_type.setdefault(drink['type'], []).append(f"- {drink['name']} ({drink['abv']}% ABV)")
-            result = "Fact: Here are all available drinks:\n"
-            for dtype, dlist in drinks_by_type.items():
-                result += f"\n{dtype.capitalize()}s:\n" + "\n".join(dlist)
-            return result
+Question: {input}
+Thought:{agent_scratchpad}
+"""
 
-    # --- Fallback: Check for specific drink names mentioned in the prompt ---
-    all_drinks_resp = SUPABASE_CLIENT.table("drinks").select("name, abv, ibu").execute()
-    if all_drinks_resp.data:
-        matched = []
-        for drink in all_drinks_resp.data:
-            if drink["name"].lower() in prompt_lower:
-                details = f"{drink['name']}: {drink['abv']}% ABV"
-                if drink.get('ibu') is not None:
-                    details += f", {drink['ibu']} IBU"
-                matched.append(details)
-        if matched:
-            return "Fact: " + ", ".join(matched) + "."
+prompt = ChatPromptTemplate.from_template(supervisor_prompt_template)
 
-    return None
+# Create the main supervisor agent
+supervisor_agent = create_react_agent(llm, tools, prompt)
+supervisor_agent_executor = AgentExecutor(
+    agent=supervisor_agent,
+    tools=tools,
+    verbose=True,
+    handle_parsing_errors=True,
+    max_iterations=5
+)
 
 
-# --- Core Application Logic ---
-
+# --- 3. CORE APPLICATION LOGIC (Unchanged) ---
 def process_prompt(user_prompt: str):
-    """
-    Main function to handle user input, orchestrate retrieval and generation,
-    and manage session state.
-    """
     st.session_state.messages.append(HumanMessage(content=user_prompt))
-
     with st.spinner("Thinking..."):
-        # 1. Rewrite the user's query to be self-contained using chat history
-        standalone_query = rewrite_query_with_history(st.session_state.messages)
-        st.sidebar.info(f"**Rewritten Query:**\n\n{standalone_query}") # Debugging
-
-        # 2. Retrieve context using the standalone query
-        structured_context = query_supabase(standalone_query)
-        semantic_context = ""
-        
-        # 3. If no structured data is found, perform a semantic search
-        if not structured_context:
-            retriever = VECTOR_STORE.as_retriever(
-                search_type="similarity_score_threshold",
-                search_kwargs={"k": 3, "score_threshold": 0.6},
-            )
-            docs = retriever.invoke(standalone_query)
-            semantic_context = "\n".join([d.page_content for d in docs])
-        
-        # 4. Combine context and generate the final response
-        context_parts = []
-        if structured_context:
-            context_parts.append(f"Structured Facts:\n{structured_context}")
-        if semantic_context:
-            context_parts.append(f"Relevant Information:\n{semantic_context}")
-        
-        combined_context = "\n\n".join(context_parts)
-        
-        # The main LLM call uses the original message history for conversational context
-        result = call_gemini(st.session_state.messages, context=combined_context)
-    
+        try:
+            response = supervisor_agent_executor.invoke({
+                "input": user_prompt,
+                "chat_history": st.session_state.messages
+            })
+            result = response['output']
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
+            result = "I'm sorry, I encountered an error. Please try again."
     st.session_state.messages.append(AIMessage(content=result))
 
-
-# --- Streamlit UI ---
-
+# --- 4. STREAMLIT UI (Unchanged) ---
 st.title("Wellsville Brewing Info BrewBot! 🍺")
-
-# Sidebar for controls
 st.sidebar.title("Controls")
 if st.sidebar.button("Restart Chat"):
     st.session_state.clear()
     st.rerun()
-
-# Initialize session state for messages
 if "messages" not in st.session_state:
     st.session_state.messages = [
         AIMessage(content="Welcome to the Wellsville Brewing Company! I'm the Info BrewBot. How can I help you today?")
     ]
-
-# Display chat history
 for message in st.session_state.messages:
     role = "user" if isinstance(message, HumanMessage) else "assistant"
     with st.chat_message(role):
         st.markdown(message.content)
-
-# Display suggestion buttons only on first load
 if len(st.session_state.messages) == 1:
     st.markdown("---")
     st.subheader("You can ask me about...")
@@ -302,7 +242,7 @@ if len(st.session_state.messages) == 1:
     suggestions = {
         "The Business 🏢": ["Tell me about the brewery", "Who are the owners?"],
         "Hours & Location 🕒": ["What are your hours?", "Where are you located?"],
-        "The Brews 🍻": ["What's the strongest drink?", "Any gluten-free options?", "Rank beers by IBU", "What IPAs do you have?"]
+        "The Brews 🍻": ["How many beers do you offer?", "Do you have any IPAs?", "Rank all beers by IBU", "What is the strongest drink?"]
     }
     for i, (title, questions) in enumerate(suggestions.items()):
         with cols[i]:
@@ -311,8 +251,6 @@ if len(st.session_state.messages) == 1:
                 if st.button(q, use_container_width=True):
                     process_prompt(q)
                     st.rerun()
-
-# Main chat input
 if prompt := st.chat_input("Ask me anything about the brewery!"):
     process_prompt(prompt)
     st.rerun()

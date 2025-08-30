@@ -1,4 +1,5 @@
-# import basics
+# ingestion.py
+
 import os
 import time
 from dotenv import load_dotenv
@@ -6,163 +7,135 @@ from dotenv import load_dotenv
 # import pinecone
 from pinecone import Pinecone, ServerlessSpec
 
-# import supabase
-from supabase import create_client, Client
-
 # import langchain
 from langchain_pinecone import PineconeVectorStore
-from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 
+# NEW: Import the unidecode library to handle special characters in IDs
+from unidecode import unidecode
+
+# --- Initialization ---
 load_dotenv()
 
-pc = Pinecone(api_key=os.environ.get("PINECONE-API-KEY"))
+# --- Pinecone Setup ---
+pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+index_name = os.environ.get("PINECONE_INDEX_NAME")
 
-index_name = os.environ.get("PINECONE-INDEX-NAME")
-
+# Check if the index exists and create it if it doesn't
 existing_indexes = [index_info["name"] for index_info in pc.list_indexes()]
 
 if index_name not in existing_indexes:
+    print(f"Creating index '{index_name}'...")
     pc.create_index(
         name=index_name,
-        dimension=768,
+        dimension=768, # Dimension for intfloat/e5-base is 768
         metric="cosine",
         spec=ServerlessSpec(cloud="aws", region="us-east-1"),
     )
+    # Wait for the index to be ready
     while not pc.describe_index(index_name).status["ready"]:
         time.sleep(1)
+    print("Index created successfully.")
+else:
+    print(f"Index '{index_name}' already exists.")
 
 index = pc.Index(index_name)
 
+# --- LangChain Setup ---
 embeddings = HuggingFaceEmbeddings(model_name="intfloat/e5-base")
-
 vector_store = PineconeVectorStore(index=index, embedding=embeddings)
 
+
+# --- OPTIMIZED DOCUMENTS FOR SEMANTIC SEARCH ---
 documents = [
     Document(
-        page_content="Hank's Hefeweizen is a hazy, deep golden ale brewed with Weihenstephan yeast that produces banana and clove notes. This beverage is a beer. The style is Hefeweizen. It has an ABV of 4.6% and an IBU (International Bitterness Units) of 13.",
+        page_content="Hank's Hefeweizen is a classic German-style wheat ale. It pours a hazy, deep golden color. The aroma and flavor are dominated by prominent notes of banana and a hint of spicy clove, all produced by the special Weihenstephan yeast. It has a soft, full-bodied mouthfeel.",
         metadata={"type": "beer", "name": "Hank's Hefeweizen", "abv": "4.6%", "ibu": 13, "style": "Hefeweizen"}
     ),
     Document(
-        page_content="Kölsch Ale is a crisp and clean ale with subtle malt sweetness and light hop balance. This beverage is a beer with a Kölsch style. It has an ABV of 4.7% and an IBU of 22.",
+        page_content="Kölsch Ale is a crisp, clean, and brilliantly clear ale. It offers a subtle malt sweetness and a light, delicate balance from the hops. It's an exceptionally smooth and easy-drinking beer, perfect for any occasion.",
         metadata={"type": "beer", "name": "Kölsch Ale", "abv": "4.7%", "ibu": 22, "style": "Kölsch"}
     ),
     Document(
-        page_content="Pittsburgh Pilsner is crisp and refreshing, with a delicate balance of floral hops and a clean malt backbone. Light body and smooth finish make it perfect for warm days. This beverage is a beer. The style is a Pilsner. It has an ABV of 5.6% and an IBU of 33.",
+        page_content="Pittsburgh Pilsner is a crisp and highly refreshing lager. It features a delicate balance of floral hop aroma and a clean, cracker-like malt backbone. Its light body and smooth, dry finish make it a perfect choice for warm days.",
         metadata={"type": "beer", "name": "Pittsburgh Pilsner", "abv": "5.6%", "ibu": 33, "style": "Pilsner"}
     ),
     Document(
-        page_content="Knit Wit Ale delivers a vibrant blend of citrus and subtle spice in a smooth, hazy wheat beer. Crisp and refreshing with a soft, lingering finish. This beverage is a beer of the Witbier style. It has an ABV of 5.4% and an IBU of 11.",
+        page_content="Knit Wit Ale is a Belgian-style wheat beer that pours hazy and pale. It delivers a vibrant blend of zesty citrus, primarily orange peel, and a subtle, spicy complexity from coriander. It's exceptionally crisp and refreshing with a soft, lingering finish.",
         metadata={"type": "beer", "name": "Knit Wit Ale", "abv": "5.4%", "ibu": 11, "style": "Witbier"}
     ),
     Document(
-        page_content="Killer Lite is similar to the mass-produced American brands: light in flavor, light in bitterness, brewed with water, barley, rice flakes and yeast. This beverage is a beer. Its style is a Light Lager. It has an ABV of 4.7% and a low IBU of 8.",
+        page_content="Killer Lite is a classic American light lager. It is intentionally light in flavor and bitterness, making it incredibly easy to drink. Brewed with barley and rice flakes for a clean, crisp, and familiar taste.",
         metadata={"type": "beer", "name": "Killer Lite", "abv": "4.7%", "ibu": 8, "style": "Light Lager"}
     ),
     Document(
-        page_content="Everyday IPA is a clone of Founder's All Day IPA. Brewed with local NY Craft 2 Row barley and oats, hopped with Amarillo and Simcoe. Sessionable at 4.1% ABV. This beverage is a beer. The style is an IPA. It has an ABV of 4.1% and an IBU of 30.",
+        page_content="Everyday IPA is a highly sessionable India Pale Ale, inspired by Founder's All Day IPA. It's brewed with local NY Craft 2 Row barley and oats, and hopped with Amarillo and Simcoe for bright citrus and pine notes. All the hop flavor without the high alcohol.",
         metadata={"type": "beer", "name": "Everyday IPA", "abv": "4.1%", "ibu": 30, "style": "IPA"}
     ),
     Document(
-        page_content="Cider Creek: Cran Mango is a tropical and fruity cider made with 100% New York State apples, cranberry, and mango. Semi-sweet with low tartness. This beverage is a cider. The style is a Fruit Cider. It has an ABV of 6.9%. This drink is gluten-free.",
+        page_content="Cider Creek: Cran Mango is a vibrant and fruity hard cider. It blends the tropical sweetness of mango with the tartness of cranberry for a perfectly balanced semi-sweet finish. Made from 100% New York State apples, this cider is naturally gluten-free.",
         metadata={"type": "cider", "name": "Cider Creek Cran Mango", "abv": "6.9%", "gluten_free": True, "style": "Fruit Cider"}
     ),
     Document(
-        page_content="Bolivar Black Gold is a dark ale with roasted malt complexity and smooth finish. This beverage is a beer. The style is a Dark Ale. It has an ABV of 5.8% and an IBU of 30.",
+        page_content="Bolivar Black Gold is a smooth dark ale. It features a rich complexity of roasted malt flavors, with hints of coffee and dark chocolate, leading to a satisfyingly smooth finish.",
         metadata={"type": "beer", "name": "Bolivar Black Gold", "abv": "5.8%", "ibu": 30, "style": "Dark Ale"}
     ),
     Document(
-        page_content="Chocolate Peanut Butter Porter is brewed with chocolate and peanut butter. Slightly sweet, lightly roasted — perfect for chilly winter days. This beverage is a beer of the Porter style. It has an ABV of 4.5% and an IBU of 23.",
+        page_content="Chocolate Peanut Butter Porter is a decadent and dessert-like dark beer. It's brewed with real chocolate and peanut butter, creating a harmonious blend of sweet, nutty, and lightly roasted flavors. A perfect treat for chilly days.",
         metadata={"type": "beer", "name": "Chocolate Peanut Butter Porter", "abv": "4.5%", "ibu": 23, "style": "Porter"}
     ),
     Document(
-        page_content="Cream Ale is smooth and easy-drinking with subtle malt sweetness, a hint of creaminess, and mild hop presence. This beverage is a beer. The style is Cream Ale. It has an ABV of 5.1% and an IBU of 9.",
+        page_content="Cream Ale is an exceptionally smooth and easy-drinking beer. It has a subtle malt sweetness, a characteristic hint of creaminess from corn, and a very mild hop presence to keep it balanced. A true American classic.",
         metadata={"type": "beer", "name": "Cream Ale", "abv": "5.1%", "ibu": 9, "style": "Cream Ale"}
     ),
     Document(
-        page_content="Irish Red Ale is a malt-forward ale brewed with pale malt and roasted barley, giving it a beautiful red color and smooth taste. This beverage is a beer. The style is a Red Ale. It has an ABV of 4.7% and an IBU of 24.",
+        page_content="Our Irish Red Ale is a malt-focused beer, brewed with pale malt and a touch of roasted barley. This gives it a beautiful ruby-red color and a smooth, slightly sweet taste with hints of caramel and toffee, finishing with a clean, dry character.",
         metadata={"type": "beer", "name": "Irish Red Ale", "abv": "4.7%", "ibu": 24, "style": "Red Ale"}
     ),
     Document(
-        page_content="Wells Oatmeal Stout is based on an English stout. Brewed with oats for body and silkiness, it's dark and rich with flavors of coffee and chocolate. This beverage is a beer. The style is a Stout. It has an ABV of 4.5% and an IBU of 29.",
+        page_content="Wells Oatmeal Stout is a classic English-style stout. Brewed with oats to create a full body and a silky, smooth mouthfeel. It's dark and rich, with robust flavors of freshly roasted coffee, dark chocolate, and a hint of sweetness.",
         metadata={"type": "beer", "name": "Wells Oatmeal Stout", "abv": "4.5%", "ibu": 29, "style": "Stout"}
     ),
     Document(
-        page_content="Sweet Summertime Kölsch Ale is bright and golden, with honeyed malt and floral hops. Bursting with pineapple and mango, crisp and refreshing. This beverage is a beer. The style is a Fruit Kölsch. It has an ABV of 4.7% and an IBU of 22.",
+        page_content="Sweet Summertime Kölsch Ale is a fruit-forward twist on a classic style. This bright golden ale is bursting with tropical notes of pineapple and mango, complemented by a honeyed malt sweetness and delicate floral hops. A truly crisp and refreshing summer beer.",
         metadata={"type": "beer", "name": "Sweet Summertime Kölsch Ale", "abv": "4.7%", "ibu": 22, "style": "Fruit Kölsch"}
     ),
     Document(
-        page_content="Hard Seltzer is crisp, refreshing, and lightly sparkling. This beverage is a hard seltzer. It has an ABV of 4.7%. It is offered in five flavors: Black Cherry, Mango, Wildberry, Coconut, and Citrus.",
+        page_content="Our Hard Seltzer is a crisp, refreshing, and lightly sparkling beverage. It serves as a perfect light alternative and is available in five distinct fruit flavors: Black Cherry, Mango, Wildberry, Coconut, and Citrus.",
         metadata={"type": "seltzer", "name": "Hard Seltzer", "abv": "4.7%", "flavors": ["Black Cherry", "Mango", "Wildberry", "Coconut", "Citrus"]}
     ),
     Document(
-        page_content=(
-            "Wellsville Brewing Company is a New York State farm brewery, "
-            "offering a classy tasting room without the bar scene, featuring light share-plates, "
-            "soup and sandwich specials, as well as tavern puzzles and board games for guests to enjoy."
-        ),
-        metadata={
-            "type": "brewery_info",
-            "category": "tasting_room",
-            "features": ["share-plates", "soup specials", "sandwich specials", "board games", "tavern puzzles"]
-        }
+        page_content="The Wellsville Brewing Company offers a classy and comfortable tasting room, distinct from a typical bar scene. We serve light shareable plates, daily soup and sandwich specials, and provide tavern puzzles and board games for our guests to enjoy.",
+        metadata={"type": "brewery_info", "category": "tasting_room", "name": "tasting-room-info"}
     ),
     Document(
-        page_content=(
-            "Located at 104 North Main Street, Wellsville, NY 14895, the brewery offers a cozy and family-friendly atmosphere."
-        ),
-        metadata={
-            "type": "location",
-            "address": "104 North Main Street, Wellsville, NY 14895",
-            "phone": "(585) 296-3230"
-        }
+        page_content="The brewery is located at 104 North Main Street, Wellsville, NY 14895. We foster a cozy, family-friendly atmosphere perfect for enjoying a drink and conversation. You can reach us at (585) 296-3230.",
+        metadata={"type": "location", "address": "104 North Main Street, Wellsville, NY 14895", "phone": "(585) 296-3230", "name": "location-info"}
     ),
     Document(
-        page_content=(
-            "The Wellsville Brewing Company opened on October 6, 2018, in a fully renovated space on historic Main Street in Wellsville, New York."
-        ),
-        metadata={
-            "type": "brewery_info",
-            "category": "history",
-            "opened": "2018-10-06"
-        }
+        page_content="The Wellsville Brewing Company first opened its doors on October 6, 2018. It is housed in a beautifully renovated building on historic Main Street in the heart of Wellsville, New York.",
+        metadata={"type": "brewery_info", "category": "history", "opened": "2018-10-06", "name": "history-info"}
     ),
     Document(
-        page_content=(
-            "As of March 2025, the Mariotti family—Kera, Joe, Isabel, and JT Mariotti—"
-            "are the proud new owners of the Wellsville Brewing Company."
-        ),
-        metadata={
-            "type": "ownership",
-            "owners": "Kera Mariotti, Joe Mariotti, Isabel Mariotti, JT Mariotti",
-            "acquisition_date": "2025-03-07"
-        }
+        page_content="As of March 2025, the Wellsville Brewing Company is under the proud new ownership of the Mariotti family: Kera, Joe, Isabel, and JT Mariotti.",
+        metadata={"type": "ownership", "owners": "Mariotti family", "name": "ownership-info"}
     ),
     Document(
-        page_content=(
-            "New owners plan to operate under normal hours—Thursday & Friday from 3 pm to 9 pm, Saturday from 2 pm to 9 pm."
-        ),
-        metadata={
-            "type": "hours",
-            "Thursday": "15:00-21:00",
-            "Friday": "15:00-21:00",
-            "Saturday": "14:00-21:00"
-        }
+        page_content="Our operating hours are Thursday and Friday from 3:00 PM to 9:00 PM, and Saturday from 2:00 PM to 9:00 PM.",
+        metadata={"type": "hours", "Thursday": "15:00-21:00", "Friday": "15:00-21:00", "Saturday": "14:00-21:00", "name": "hours-info"}
     )
 ]
 
-# generate unique id's
+# --- Data Ingestion ---
 
-i = 0
-uuids = []
+# Generate stable, compliant IDs from the document metadata
+ids_raw = [doc.metadata.get("name", f"info-{i}") for i, doc in enumerate(documents)]
 
-while i < len(documents):
+# Clean up IDs to be Pinecone-compliant (ASCII)
+ids = [unidecode(str(id).replace(" ", "-").lower()) for id in ids_raw]
 
-    i += 1
-
-    uuids.append(f"id{i}")
-
-# add to database
-
-vector_store.add_documents(documents=documents, ids=uuids)
+# Use upsert for adding/updating documents. This will overwrite existing vectors with the same ID.
+print("Adding/updating documents in Pinecone vector store...")
+vector_store.add_documents(documents=documents, ids=ids)
+print(f"Successfully added/updated {len(documents)} documents.")
