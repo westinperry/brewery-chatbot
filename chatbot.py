@@ -25,7 +25,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 # --- API Clients & Model Configuration ---
 try:
     # Initialize LLM
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0, google_api_key=os.environ["GEMINI_API_KEY"])
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0, google_api_key=os.environ["GEMINI_API_KEY"])
 
     # Initialize Pinecone & Vector Store
     pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
