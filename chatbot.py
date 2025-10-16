@@ -1,40 +1,32 @@
-# chatbot.py
 import streamlit as st
 import os
 from dotenv import load_dotenv
 
-# --- Initialization ---
 load_dotenv()
 st.set_page_config(page_title="WBC BrewBot", layout="wide")
 
-# LangChain Imports
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain.agents import AgentExecutor, create_react_agent, tool
-# DEPRECATED: from langchain.tools.retriever import create_retriever_tool
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-# Pinecone
 from pinecone import Pinecone
 from langchain_pinecone import PineconeVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
 
-# --- API Clients & Model Configuration ---
 try:
-    # Initialize LLM
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0, google_api_key=os.environ["GEMINI_API_KEY"])
 
-    # Initialize Pinecone & Vector Store
     pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
     index_name = os.environ["PINECONE_INDEX_NAME"]
     index = pc.Index(index_name)
     embeddings = HuggingFaceEmbeddings(model_name="intfloat/e5-base")
     vector_store = PineconeVectorStore(index=index, embedding=embeddings)
 
-    # Provide a custom description for the 'drinks' table to give the SQL agent context.
+    # Tell the SQL agent how to use the drinks table effectively
     custom_table_info = {
         "drinks": """
         This table contains a complete list of all beverages.
@@ -43,7 +35,6 @@ try:
         """
     }
     
-    # Initialize Supabase Connection for SQL Agent with the custom table info
     db_uri = (
         f"postgresql://{os.environ['SUPABASE_DB_USER']}:{os.environ['SUPABASE_DB_PASSWORD']}"
         f"@{os.environ['SUPABASE_DB_HOST']}:{os.environ['SUPABASE_DB_PORT']}/{os.environ['SUPABASE_DB_NAME']}"
@@ -55,19 +46,12 @@ except (KeyError, Exception) as e:
     st.stop()
 
 
-# --- 1. DEFINE TOOLS ---
-
-# --- NEW: Helper function to format retrieved documents ---
+# Format retrieved documents with their metadata for readability
 def format_docs_with_metadata(docs: list[Document]) -> str:
-    """
-    Formats a list of documents, including their metadata, into a single string.
-    """
     formatted_docs = []
     for i, doc in enumerate(docs):
-        # Start with the main description
         content = f"Result {i+1}:\nDescription: {doc.page_content}\n"
         
-        # Add metadata in a clean, readable format
         meta_info = []
         if 'name' in doc.metadata:
             meta_info.append(f"Name: {doc.metadata['name']}")
@@ -88,7 +72,7 @@ def format_docs_with_metadata(docs: list[Document]) -> str:
     return "\n---\n".join(formatted_docs)
 
 
-# --- NEW: Consolidated Semantic Search Tool ---
+# Semantic search for general brewery info and subjective queries
 @tool
 def semantic_brewery_search(query: str) -> str:
     """
@@ -100,17 +84,16 @@ def semantic_brewery_search(query: str) -> str:
     st.sidebar.info("Used Semantic Search for a descriptive answer.")
     retriever = vector_store.as_retriever(
         search_type="similarity_score_threshold",
-        search_kwargs={"k": 3, "score_threshold": 0.5}, # Lowered threshold slightly for broader concepts
+        search_kwargs={"k": 3, "score_threshold": 0.5},
     )
     docs = retriever.invoke(query)
     if not docs:
         return "No relevant information found in the brewery's general information."
     
-    # Use the new formatting function to include metadata
     return format_docs_with_metadata(docs)
 
 
-# SQL Agent for structured data queries
+# SQL agent handles structured database queries
 sql_agent_executor = create_sql_agent(
     llm=llm,
     db=db,
@@ -120,7 +103,7 @@ sql_agent_executor = create_sql_agent(
     max_iterations=5
 )
 
-# --- REVISED: Hybrid Tool with Fallback to the NEW Semantic Tool ---
+# Primary tool for drink lookups with fallback to semantic search
 @tool
 def drink_database_tool(query: str) -> str:
     """
@@ -130,27 +113,23 @@ def drink_database_tool(query: str) -> str:
     This tool is NOT for subjective recommendations (e.g., 'what tastes good?').
     If this tool returns an empty or "no results" answer, you MUST use the `semantic_brewery_search` tool as a fallback.
     """
-    # First, try the precise SQL search
     try:
         st.sidebar.info("Attempting a precise database search (SQL)...")
         sql_result = sql_agent_executor.invoke({"input": query})
         output = sql_result.get("output", "")
 
-        # Define negative keywords that indicate an empty but valid SQL response
         negative_keywords = [
             "no results", "no drinks", "no beers", "no ciders",
             "are no", "are not any", "don't have any", "do not have any",
             "doesn't have", "does not have"
         ]
         
-        # Check if the output is meaningful. If it's empty, just says "[]", or contains a negative keyword, it's not useful.
         is_meaningful = output and "[]" not in output and not any(kw in output.lower() for kw in negative_keywords)
 
         if is_meaningful:
             st.sidebar.success("SQL Tool found a definitive answer.")
             return output
         else:
-            # If SQL returns no results, explicitly state this so the agent knows to fallback.
             st.sidebar.warning("SQL did not find a definitive answer.")
             return "No definitive results were found in the drink database. Try a different search."
 
@@ -159,12 +138,8 @@ def drink_database_tool(query: str) -> str:
         return "The drink database could not be searched due to an error."
 
 
-# --- 2. CREATE SUPERVISOR AGENT ---
-
-# Define the list of tools the supervisor can use
 tools = [drink_database_tool, semantic_brewery_search]
 
-# Define the supervisor's prompt template
 supervisor_prompt_template = """
 You are a helpful and friendly assistant for the Wellsville Brewing Company named 'BrewBot'.
 Your primary goal is to provide accurate information from the brewery's database and documents.
@@ -195,7 +170,6 @@ Thought:{agent_scratchpad}
 
 prompt = ChatPromptTemplate.from_template(supervisor_prompt_template)
 
-# Create the main supervisor agent
 supervisor_agent = create_react_agent(llm, tools, prompt)
 supervisor_agent_executor = AgentExecutor(
     agent=supervisor_agent,
@@ -206,7 +180,6 @@ supervisor_agent_executor = AgentExecutor(
 )
 
 
-# --- 3. CORE APPLICATION LOGIC (Unchanged) ---
 def process_prompt(user_prompt: str):
     st.session_state.messages.append(HumanMessage(content=user_prompt))
     with st.spinner("Thinking..."):
@@ -221,7 +194,6 @@ def process_prompt(user_prompt: str):
             result = "I'm sorry, I encountered an error. Please try again."
     st.session_state.messages.append(AIMessage(content=result))
 
-# --- 4. STREAMLIT UI (Unchanged) ---
 st.title("Wellsville Brewing Info BrewBot! 🍺")
 st.sidebar.title("Controls")
 if st.sidebar.button("Restart Chat"):
