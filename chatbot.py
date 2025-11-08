@@ -112,6 +112,10 @@ def format_docs_with_metadata(docs: List[Document]) -> str:
 
 @tool
 def semantic_brewery_search(query: str) -> str:
+    """
+    Use semantic search for general info: hours, location, history, or
+    descriptive drink questions (e.g., “good summer beer”).
+    """
     retriever = vector_store.as_retriever(
         search_type="similarity_score_threshold",
         search_kwargs={"k": 3, "score_threshold": 0.5},
