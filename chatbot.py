@@ -64,13 +64,12 @@ def init_sql_db() -> SQLDatabase:
         The table name is always "drinks".
         Columns: id, gluten_free, description, ibu, abv, style, type, name.
         - To count ALL drinks: SELECT COUNT(*) FROM drinks
-        - For highest ABV/IBU for a specific type (e.g. beer), always filter with WHERE type ILIKE '<type>'.
+        - For highest ABV/IBU for a specific type (e.g. beer), always filter: WHERE type ILIKE '<type>' AND abv IS NOT NULL ORDER BY abv DESC LIMIT 1
         - For 'what beer has the highest ABV?', run: 
-          SELECT name, abv FROM drinks WHERE type ILIKE 'beer' ORDER BY abv DESC LIMIT 1
+          SELECT name, abv FROM drinks WHERE type ILIKE 'beer' AND abv IS NOT NULL ORDER BY abv DESC LIMIT 1
         - For 'what drink has the highest ABV?', run: 
-          SELECT name, abv FROM drinks ORDER BY abv DESC LIMIT 1
-        Result for a type (beer, cider, etc.) must always have a matching type.
-        If the field is NULL, exclude from ranking.
+          SELECT name, abv FROM drinks WHERE abv IS NOT NULL ORDER BY abv DESC LIMIT 1
+        When the request is for a specific drink type, your answer must always match that type. Never return cider for a beer query, or beer for a cider query, etc. Exclude rows where abv or ibu is NULL.
         '''
     }
     uri = (
@@ -180,14 +179,24 @@ tool_calling_template = """
 You are BrewBot for Wellsville Brewing Company.
 
 Rules:
-1) For highest/lowest ABV or IBU: 
-  - If type is specified (e.g. beer, cider), filter with WHERE type ILIKE '<type>' and ORDER BY abv/ibu.
-  - If no type is specified, search all drinks.
-2) Use ILIKE for all type filtering, never '=' or LIKE.
-3) Result for a type (beer, cider, etc.) must always be of that type!
-4) For "how many drinks", count all records in 'drinks'.
-5) For "how many beers/ciders/seltzers", count WHERE type ILIKE '<type>'.
+1) For 'what beer has the highest ABV?', always use:
+   SELECT name, abv FROM drinks WHERE type ILIKE 'beer' AND abv IS NOT NULL ORDER BY abv DESC LIMIT 1
+   Your answer must always be a beer, never a cider, seltzer, or other type, even if those have a higher ABV.
+
+2) For 'what cider has the highest ABV?', same logic with type ILIKE 'cider'.
+
+3) For overall ('what drink has the highest ABV?'), omit type filter:
+   SELECT name, abv FROM drinks WHERE abv IS NOT NULL ORDER BY abv DESC LIMIT 1
+
+4) If the request is for beers, output must always be a beer, even if another drink has a higher ABV. 
+   This rule applies for ciders, seltzers, etc. Never substitute types.
+
+5) For counting drinks:
+   - 'How many beers' → SELECT COUNT(*) FROM drinks WHERE type ILIKE 'beer'
+   - 'How many drinks' → SELECT COUNT(*) FROM drinks
+
 6) Never ask for table name; it's always 'drinks'.
+
 7) If SQL cannot answer, fallback to semantic_brewery_search.
 
 Question: {input}
