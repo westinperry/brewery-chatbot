@@ -3,7 +3,7 @@
 Streamlit app for Wellsville Brewing Company (WBC) info and drink lookup.
 
 Hybrid strategy:
-  - Use SQL via Supabase for structured queries (count, list, filter).
+  - Use SQL via Supabase for structured queries.
   - Fall back to semantic retrieval (Pinecone + HF embeddings) for descriptive info.
 
 Required env:
@@ -18,7 +18,7 @@ Required env:
 """
 
 import os
-from typing import List, Dict, Any
+from typing import List
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -170,41 +170,30 @@ def drink_database_tool(query: str) -> str:
         if meaningful:
             return output
         return "No definitive results in drink database."
-    except Exception as e:
+    except Exception:
         # Avoid surfacing stack traces to the user; keep it short.
-        return f"Drink database query failed."
+        return "Drink database query failed."
 
 
 # --- Supervisor agent -------------------------------------------------------
 
 tools = [drink_database_tool, semantic_brewery_search]
 
-supervisor_prompt_template = """
-You are BrewBot, an assistant for Wellsville Brewing Company.
-Answer accurately using the provided tools.
+# IMPORTANT: ReAct expects only {input} and {agent_scratchpad}. Do not include {tools} or {tool_names}.
+react_template = """
+You are BrewBot for Wellsville Brewing Company.
 
-Use rules:
+Rules:
 1) For listing/counting/filtering drinks (e.g., “how many IPAs”, “strongest beer”, “list all ciders”),
-   call drink_database_tool first.
-2) If drink_database_tool returns “No definitive results in drink database.” or an error message,
-   call semantic_brewery_search with the same query.
-3) For general questions about the brewery (hours, history, location) or subjective recommendations,
-   call semantic_brewery_search directly.
-
-Follow this format:
-Thought: reasoning
-Action: one of [{tool_names}]
-Action Input: the input
-Observation: tool result
-... repeat as needed
-Thought: finalizing
-Final Answer: the answer to the user
+   try drink_database_tool first.
+2) If drink_database_tool returns no definitive results or fails, try semantic_brewery_search.
+3) For general brewery questions or subjective recommendations, use semantic_brewery_search.
 
 Question: {input}
-Thought:{agent_scratchpad}
-"""
+{agent_scratchpad}
+""".strip()
 
-prompt = ChatPromptTemplate.from_template(supervisor_prompt_template)
+prompt = ChatPromptTemplate.from_template(react_template)
 
 supervisor_agent = create_react_agent(llm, tools, prompt)
 
@@ -227,7 +216,7 @@ def process_prompt(user_prompt: str) -> None:
                 {"input": user_prompt, "chat_history": st.session_state.messages}
             )
             result = response.get("output", "")
-        except Exception as e:
+        except Exception:
             st.error("An error occurred while processing your request.")
             result = "Sorry, something went wrong. Please try again."
     st.session_state.messages.append(AIMessage(content=result))
