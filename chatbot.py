@@ -145,9 +145,8 @@ sql_agent_executor = create_sql_agent(
 @tool
 def drink_database_tool(query: str) -> str:
     """
-    Use for listing, counting, ranking, or filtering drinks by ABV/IBU/style/type.
-    Not for subjective recommendations. If no definitive results, return a clear
-    message so the caller can fallback to semantic search.
+    Attempt to answer structured drink queries with SQL first. 
+    If no meaningful results, fallback to semantic search.
     """
     try:
         result = sql_agent_executor.invoke({"input": query})
@@ -163,16 +162,18 @@ def drink_database_tool(query: str) -> str:
             "do not have any",
             "doesn't have",
             "does not have",
+            "I can tell you how many beers are offered. What is the name of the table that contains information about drinks?",
         ]
         meaningful = bool(output) and "[]" not in output and not any(
             kw in output.lower() for kw in negatives
         )
         if meaningful:
             return output
-        return "No definitive results in drink database."
+        # Explicit fallback to semantic search if SQL result is not useful
+        return semantic_brewery_search(query)
     except Exception:
-        # Avoid surfacing stack traces to the user; keep it short.
-        return "Drink database query failed."
+        # On error, also fallback to semantic search
+        return semantic_brewery_search(query)
 
 
 # --- Supervisor agent (tool-calling) ----------------------------------------
