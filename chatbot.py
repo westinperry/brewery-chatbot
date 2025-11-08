@@ -71,14 +71,13 @@ def init_vector_store(model_name: str = "intfloat/e5-base") -> PineconeVectorSto
 
 
 def init_sql_db() -> SQLDatabase:
-    # Provide concise schema help for the agent.
+    # Add explicit instructions for the table name and schema.
     custom_table_info = {
         "drinks": """
-This table lists all beverages.
-- Filter by category in 'type' (e.g., beer, cider).
-- Filter by style in 'style' (use ILIKE for case-insensitive).
-- Strength and bitterness are in 'abv' and 'ibu'.
-"""
+        This table contains all information about drinks (beers, ciders, etc).
+        The table name is always 'drinks'. Never ask the user for the table name; just use this table.
+        Columns: id, gluten_free, description, ibu, abv, style, type, name.
+        """
     }
     uri = (
         f"postgresql://{require_env('SUPABASE_DB_USER')}:{require_env('SUPABASE_DB_PASSWORD')}"
@@ -141,12 +140,12 @@ sql_agent_executor = create_sql_agent(
     max_iterations=5,
 )
 
-
 @tool
 def drink_database_tool(query: str) -> str:
     """
-    Attempt to answer structured drink queries with SQL first. 
-    If no meaningful results, fallback to semantic search.
+    Answer drink questions using the 'drinks' SQL table. 
+    If no meaningful result, fallback to semantic search.
+    The table name is always 'drinks' (never ask the user).
     """
     try:
         result = sql_agent_executor.invoke({"input": query})
@@ -162,17 +161,17 @@ def drink_database_tool(query: str) -> str:
             "do not have any",
             "doesn't have",
             "does not have",
-            "I can tell you how many beers are offered. What is the name of the table that contains information about drinks?",
+            "what is the name of the table",
+            "I can tell you how many beers are offered. What is the name of the table that contains information about drinks?"  # catch this specific loop
         ]
         meaningful = bool(output) and "[]" not in output and not any(
             kw in output.lower() for kw in negatives
         )
         if meaningful:
             return output
-        # Explicit fallback to semantic search if SQL result is not useful
+        # Fallback to semantic search if output is not meaningful
         return semantic_brewery_search(query)
     except Exception:
-        # On error, also fallback to semantic search
         return semantic_brewery_search(query)
 
 
@@ -185,8 +184,8 @@ You are BrewBot for Wellsville Brewing Company.
 
 Rules:
 1) For listing/counting/filtering drinks (e.g., “how many IPAs”, “strongest beer”, “list all ciders”),
-   try drink_database_tool first.
-2) If drink_database_tool returns no definitive results or fails, try semantic_brewery_search.
+   always use the SQL table named 'drinks'.
+2) If SQL does not find meaningful results, use semantic search via Pinecone.
 3) For general brewery questions or subjective recommendations, use semantic_brewery_search.
 
 Question: {input}
