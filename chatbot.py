@@ -74,11 +74,12 @@ def init_sql_db() -> SQLDatabase:
     custom_table_info = {
         "drinks": """
         This table contains all drinks: beers, ciders, etc.
-        The table name is always 'drinks'. Never ask the user for the table name; use 'drinks' for all queries.
+        The table name is always 'drinks'.
         Columns: id, gluten_free, description, ibu, abv, style, type, name.
-        Filter beers with WHERE type='beer'; ciders with WHERE type='cider'.
+        Filter beers/ciders with WHERE type ILIKE 'beer' or ILIKE 'cider' for case-insensitive search.
         """
     }
+
     uri = (
         f"postgresql://{require_env('SUPABASE_DB_USER')}:{require_env('SUPABASE_DB_PASSWORD')}"
         f"@{require_env('SUPABASE_DB_HOST')}:{require_env('SUPABASE_DB_PORT')}/{require_env('SUPABASE_DB_NAME')}"
