@@ -68,6 +68,10 @@ def init_sql_db() -> SQLDatabase:
         - To count beers: SELECT COUNT(*) FROM drinks WHERE type ILIKE 'beer'
         - To count ciders: SELECT COUNT(*) FROM drinks WHERE type ILIKE 'cider'
         - To count seltzers: SELECT COUNT(*) FROM drinks WHERE type ILIKE 'seltzer'
+        - For highest ABV overall: SELECT name, abv FROM drinks ORDER BY abv DESC LIMIT 1
+        - For highest ABV of a type: SELECT name, abv FROM drinks WHERE type ILIKE '<type>' ORDER BY abv DESC LIMIT 1
+        - For highest IBU overall: SELECT name, ibu FROM drinks ORDER BY ibu DESC LIMIT 1
+        - For highest IBU of a type: SELECT name, ibu FROM drinks WHERE type ILIKE '<type>' ORDER BY ibu DESC LIMIT 1
         Always use ILIKE for type filtering; never ask the user for table name.
         """
     }
@@ -130,8 +134,8 @@ sql_agent_executor = create_sql_agent(
 @tool
 def drink_database_tool(query: str) -> str:
     """
-    For 'how many drinks' queries, use SELECT COUNT(*) FROM drinks.
-    For drink type queries (beers, ciders, etc.), use SELECT COUNT(*) FROM drinks WHERE type ILIKE '<type>'.
+    For counting: use SELECT COUNT(*) FROM drinks, or SELECT COUNT(*) FROM drinks WHERE type ILIKE '<type>'.
+    For highest/lowest ABV or IBU: use ORDER BY abv/ibu DESC/ASC LIMIT 1 (optionally filter by type).
     If SQL fails or gives poor results, fallback to semantic search.
     """
     try:
@@ -150,7 +154,7 @@ def drink_database_tool(query: str) -> str:
             "doesn't have", "does not have",
             "what is the name of the table",
             "I can't give you the total number of beers we have. I can only provide details about specific beers.",
-            "I can tell you how many beers are offered. What is the name of the table"
+            "I can only count drinks or search for drink types. I cannot determine which drink has the highest ABV.",
         ]
         meaningful = bool(output) and "[]" not in output and not any(
             kw in output.lower() for kw in negatives
@@ -169,11 +173,14 @@ tool_calling_template = """
 You are BrewBot for Wellsville Brewing Company.
 
 Rules:
-1) For 'how many drinks' just count all records in 'drinks'.
-2) For 'how many beers', 'how many ciders', 'how many seltzers', count with WHERE type ILIKE '<type>'.
-3) Use ILIKE for type comparisons, never '=' or LIKE.
-4) Never ask for table name; it's always 'drinks'.
-5) If SQL does not give a useful answer, fallback to semantic_brewery_search.
+1) For 'how many drinks', count all records in 'drinks'.
+2) For 'how many beers/ciders/seltzers', use WHERE type ILIKE '<type>' in your counting queries.
+3) For 'highest/lowest ABV' or 'highest/lowest IBU':
+   - If no type specified, use ORDER BY abv/ibu on all drinks.
+   - If type specified, use WHERE type ILIKE '<type>' and ORDER BY abv/ibu.
+4) Use ILIKE for type comparisons, never '=' or LIKE.
+5) Never ask for table name; it's always 'drinks'.
+6) If SQL does not give a useful answer, fallback to semantic_brewery_search.
 
 Question: {input}
 Scratchpad:
@@ -240,7 +247,9 @@ if len(st.session_state.messages) == 1:
             "How many drinks do you offer?",
             "How many beers do you offer?",
             "How many ciders do you offer?",
-            "Do you have any IPAs?",
+            "What beer has the highest ABV?",
+            "What drink has the highest ABV?",
+            "What beer has the highest IBU?",
             "Rank all beers by IBU",
             "What is the strongest drink?",
         ],
