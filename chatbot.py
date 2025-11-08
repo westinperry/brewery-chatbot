@@ -31,7 +31,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 # LangChain agents and SQL
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
-from langchain.agents import AgentExecutor, create_react_agent, tool
+from langchain.agents import AgentExecutor, tool, create_tool_calling_agent
 
 # LLM
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -175,12 +175,11 @@ def drink_database_tool(query: str) -> str:
         return "Drink database query failed."
 
 
-# --- Supervisor agent -------------------------------------------------------
+# --- Supervisor agent (tool-calling) ----------------------------------------
 
 tools = [drink_database_tool, semantic_brewery_search]
 
-# IMPORTANT: ReAct expects only {input} and {agent_scratchpad}. Do not include {tools} or {tool_names}.
-react_template = """
+tool_calling_template = """
 You are BrewBot for Wellsville Brewing Company.
 
 Rules:
@@ -190,13 +189,11 @@ Rules:
 3) For general brewery questions or subjective recommendations, use semantic_brewery_search.
 
 Question: {input}
-{agent_scratchpad}
 """.strip()
 
-prompt = ChatPromptTemplate.from_template(react_template)
+tc_prompt = ChatPromptTemplate.from_template(tool_calling_template)
 
-supervisor_agent = create_react_agent(llm, tools, prompt)
-
+supervisor_agent = create_tool_calling_agent(llm, tools, tc_prompt)
 supervisor_agent_executor = AgentExecutor(
     agent=supervisor_agent,
     tools=tools,
