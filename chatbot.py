@@ -41,7 +41,6 @@ from pinecone import Pinecone
 from langchain_pinecone import PineconeVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
 
-
 # --- App setup ---------------------------------------------------------------
 
 load_dotenv()
@@ -71,12 +70,13 @@ def init_vector_store(model_name: str = "intfloat/e5-base") -> PineconeVectorSto
 
 
 def init_sql_db() -> SQLDatabase:
-    # Add explicit instructions for the table name and schema.
+    # Make the SQL table context explicit
     custom_table_info = {
         "drinks": """
-        This table contains all information about drinks (beers, ciders, etc).
-        The table name is always 'drinks'. Never ask the user for the table name; just use this table.
+        This table contains all drinks: beers, ciders, etc.
+        The table name is always 'drinks'. Never ask the user for the table name; use 'drinks' for all queries.
         Columns: id, gluten_free, description, ibu, abv, style, type, name.
+        Filter beers with WHERE type='beer'; ciders with WHERE type='cider'.
         """
     }
     uri = (
@@ -86,7 +86,6 @@ def init_sql_db() -> SQLDatabase:
     return SQLDatabase.from_uri(uri, custom_table_info=custom_table_info)
 
 
-# Initialize services with clear failure path.
 try:
     llm = init_llm()
     vector_store = init_vector_store()
@@ -99,9 +98,6 @@ except Exception as e:
 # --- Tools ------------------------------------------------------------------
 
 def format_docs_with_metadata(docs: List[Document]) -> str:
-    """
-    Render retrieved docs in a compact, human-readable block.
-    """
     parts = []
     for i, doc in enumerate(docs, start=1):
         meta = doc.metadata or {}
@@ -110,27 +106,22 @@ def format_docs_with_metadata(docs: List[Document]) -> str:
             if key in meta:
                 fields.append(f"{key.capitalize()}: {meta[key]}")
         detail = " | ".join(fields) if fields else "No details available"
-        parts.append(f"Result {i}:\nDescription: {doc.page_content}\nDetails: {detail}")
+        parts.append(f"Result {i}: Description: {doc.page_content} Details: {detail}")
     return "\n---\n".join(parts)
 
 
 @tool
 def semantic_brewery_search(query: str) -> str:
-    """
-    Use semantic search for general info: hours, location, history, or
-    descriptive drink questions (e.g., “good summer beer”).
-    """
     retriever = vector_store.as_retriever(
         search_type="similarity_score_threshold",
         search_kwargs={"k": 3, "score_threshold": 0.5},
     )
     docs = retriever.invoke(query)
     if not docs:
-        return "No relevant information found in the brewery's general documents."
+        return "No relevant information found."
     return format_docs_with_metadata(docs)
 
 
-# SQL Agent for structured queries
 sql_agent_executor = create_sql_agent(
     llm=llm,
     db=db,
@@ -143,33 +134,25 @@ sql_agent_executor = create_sql_agent(
 @tool
 def drink_database_tool(query: str) -> str:
     """
-    Answer drink questions using the 'drinks' SQL table. 
-    If no meaningful result, fallback to semantic search.
-    The table name is always 'drinks' (never ask the user).
+    Answer with SQL using 'drinks' table. If SQL fails, fallback to semantic search.
+    Never ask the user for table name; always use 'drinks'.
     """
     try:
         result = sql_agent_executor.invoke({"input": query})
         output = (result or {}).get("output", "")
         negatives = [
-            "no results",
-            "no drinks",
-            "no beers",
-            "no ciders",
-            "are no",
-            "are not any",
-            "don't have any",
-            "do not have any",
-            "doesn't have",
-            "does not have",
+            "no results", "no drinks", "no beers", "no ciders",
+            "are no", "are not any", "don't have any", "do not have any",
+            "doesn't have", "does not have",
             "what is the name of the table",
-            "I can tell you how many beers are offered. What is the name of the table that contains information about drinks?"  # catch this specific loop
+            "I can't give you the total number of beers we have. I can only provide details about specific beers.",
+            "I can tell you how many beers are offered. What is the name of the table"
         ]
         meaningful = bool(output) and "[]" not in output and not any(
             kw in output.lower() for kw in negatives
         )
         if meaningful:
             return output
-        # Fallback to semantic search if output is not meaningful
         return semantic_brewery_search(query)
     except Exception:
         return semantic_brewery_search(query)
@@ -183,9 +166,8 @@ tool_calling_template = """
 You are BrewBot for Wellsville Brewing Company.
 
 Rules:
-1) For listing/counting/filtering drinks (e.g., “how many IPAs”, “strongest beer”, “list all ciders”),
-   always use the SQL table named 'drinks'.
-2) If SQL does not find meaningful results, use semantic search via Pinecone.
+1) For listing, counting, filtering, or ranking drinks (like “how many beers”, “total number of beers”, “all ciders”), always use 'drinks' as the table.
+2) If SQL does not give a useful answer, fallback to semantic_brewery_search.
 3) For general brewery questions or subjective recommendations, use semantic_brewery_search.
 
 Question: {input}
@@ -204,9 +186,6 @@ supervisor_agent_executor = AgentExecutor(
     max_iterations=5,
 )
 
-
-# --- App logic --------------------------------------------------------------
-
 def process_prompt(user_prompt: str) -> None:
     st.session_state.messages.append(HumanMessage(content=user_prompt))
     with st.spinner("Thinking..."):
@@ -219,9 +198,6 @@ def process_prompt(user_prompt: str) -> None:
             st.error("An error occurred while processing your request.")
             result = "Sorry, something went wrong. Please try again."
     st.session_state.messages.append(AIMessage(content=result))
-
-
-# --- UI ---------------------------------------------------------------------
 
 st.title("Wellsville Brewing Info BrewBot 🍺")
 st.sidebar.title("Controls")
@@ -241,7 +217,6 @@ for message in st.session_state.messages:
     with st.chat_message(role):
         st.markdown(message.content)
 
-# Quick suggestions on first load
 if len(st.session_state.messages) == 1:
     st.markdown("---")
     st.subheader("Try one of these:")
@@ -264,7 +239,6 @@ if len(st.session_state.messages) == 1:
                     process_prompt(q)
                     st.rerun()
 
-# Input
 if prompt_text := st.chat_input("Ask me anything about the brewery!"):
     process_prompt(prompt_text)
     st.rerun()
