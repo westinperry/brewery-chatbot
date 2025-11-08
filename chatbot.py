@@ -1,42 +1,38 @@
 # chatbot.py
+
 """
 Streamlit app for Wellsville Brewing Company (WBC) info and drink lookup.
 Sidebar logs show agent-generated SQL and tool logic.
-
 Required env:
-  GEMINI_API_KEY
-  PINECONE_API_KEY
-  PINECONE_INDEX_NAME
-  SUPABASE_DB_USER
-  SUPABASE_DB_PASSWORD
-  SUPABASE_DB_HOST
-  SUPABASE_DB_PORT
-  SUPABASE_DB_NAME
+GEMINI_API_KEY
+PINECONE_API_KEY
+PINECONE_INDEX_NAME
+SUPABASE_DB_USER
+SUPABASE_DB_PASSWORD
+SUPABASE_DB_HOST
+SUPABASE_DB_PORT
+SUPABASE_DB_NAME
 """
 
 import os
 from typing import List
-
 import streamlit as st
 from dotenv import load_dotenv
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, AIMessage
-
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain.agents import AgentExecutor, tool, create_tool_calling_agent
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-
 from pinecone import Pinecone
 from langchain_pinecone import PineconeVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 st.set_page_config(page_title="WBC BrewBot", layout="wide")
-
 
 def require_env(name: str) -> str:
     value = os.environ.get(name)
@@ -60,17 +56,18 @@ def init_vector_store(model_name: str = "intfloat/e5-base") -> PineconeVectorSto
 def init_sql_db() -> SQLDatabase:
     custom_table_info = {
         "drinks": '''
-        This table contains all drinks: beers, ciders, seltzers, etc.
-        The table name is always "drinks".
-        Columns: id, gluten_free, description, ibu, abv, style, type, name.
-        - To count ALL drinks: SELECT COUNT(*) FROM drinks
-        - For highest ABV/IBU for a specific type (e.g. beer), always filter: WHERE type ILIKE '<type>' AND abv IS NOT NULL ORDER BY abv DESC LIMIT 1
-        - For 'what beer has the highest ABV?', run: 
-          SELECT name, abv FROM drinks WHERE type ILIKE 'beer' AND abv IS NOT NULL ORDER BY abv DESC LIMIT 1
-        - For 'what drink has the highest ABV?', run: 
-          SELECT name, abv FROM drinks WHERE abv IS NOT NULL ORDER BY abv DESC LIMIT 1
-        When the request is for a specific drink type, your answer must always match that type. Never return cider for a beer query, or beer for a cider query, etc. Exclude rows where abv or ibu is NULL.
-        '''
+This table contains all drinks: beers, ciders, seltzers, etc.
+The table name is always "drinks".
+Columns: id, gluten_free, description, ibu, abv, style, type, name.
+- To count ALL drinks: SELECT COUNT(*) FROM drinks
+- For highest ABV/IBU for a specific type (e.g. beer), always filter with WHERE type ILIKE ''.
+- For 'what beer has the highest ABV?', run:
+SELECT name, abv FROM drinks WHERE type ILIKE 'beer' AND abv IS NOT NULL ORDER BY abv DESC LIMIT 1
+- For 'what drink has the highest ABV?', run:
+SELECT name, abv FROM drinks WHERE abv IS NOT NULL ORDER BY abv DESC LIMIT 1
+Result for a type (beer, cider, etc.) must always have a matching type.
+If the field is NULL, exclude from ranking.
+'''
     }
     uri = (
         f"postgresql://{require_env('SUPABASE_DB_USER')}:{require_env('SUPABASE_DB_PASSWORD')}"
@@ -129,10 +126,28 @@ sql_agent_executor = create_sql_agent(
 @tool
 def drink_database_tool(query: str) -> str:
     """
-    For count or extrema questions, always use WHERE type ILIKE '<type>' when a type is specified.
+    For count or extrema questions, always use WHERE type ILIKE '' when a type is specified.
     For 'what beer has the highest ABV', return only a drink with type=beer, never cider.
     If SQL fails or gives poor results, fallback to semantic search.
     """
+    # For highest abv beer: Only show SQL output, no hardcoded fallback
+    if "beer" in query.lower() and "highest abv" in query.lower():
+        try:
+            result = sql_agent_executor.invoke({"input": query})
+            steps = result.get("intermediate_steps", [])
+            sql_queries = []
+            for s in steps:
+                if isinstance(s, tuple):
+                    tool_input, tool_output = s
+                    sql_queries.append(f"In: {tool_input}\nOut: {tool_output}")
+            st.session_state.setdefault("sql_logs", []).extend(sql_queries)
+            output = (result or {}).get("output", "")
+            # Only display SQL output, not fallback values
+            return output if output else "No result found for highest ABV beer."
+        except Exception as e:
+            return f"Error retrieving highest ABV beer: {e}"
+
+    # General fallback for other queries
     try:
         result = sql_agent_executor.invoke({"input": query})
         steps = result.get("intermediate_steps", [])
@@ -143,6 +158,7 @@ def drink_database_tool(query: str) -> str:
                 sql_queries.append(f"In: {tool_input}\nOut: {tool_output}")
         st.session_state.setdefault("sql_logs", []).extend(sql_queries)
         output = (result or {}).get("output", "")
+        # Defensive: fallback to semantic if nothing found
         negatives = [
             "no results", "no drinks", "no beers", "no ciders",
             "are no", "are not any", "don't have any", "do not have any",
@@ -151,61 +167,30 @@ def drink_database_tool(query: str) -> str:
             "I can't give you the total number of beers we have. I can only provide details about specific beers.",
             "I can only count drinks or search for drink types. I cannot determine which drink has the highest ABV.",
         ]
-        # Defensive post-process: if asking for 'beer' ABV, must have type=beer
-        if "beer" in query.lower() and "highest abv" in query.lower():
-            # Optionally: Extra validation with pattern match
-            beer_names = [
-                "Hefeweizen", "Kölsch", "Pilsner", "Witbier", "Light Lager",
-                "IPA", "Dark Ale", "Porter", "Cream Ale", "Red Ale",
-                "Stout", "Fruit Kölsch"
-            ]
-            if not any(name.lower() in output.lower() for name in beer_names):
-                return (
-                    "Sorry, the query did not return a beer. The beer with the highest ABV is likely 'Dark Ale' at 5.8%, "
-                    "as there are no beers with ABV higher than that in the menu."
-                )
-        meaningful = bool(output) and "[]" not in output and not any(
-            kw in output.lower() for kw in negatives
-        )
-        if meaningful:
+        if output and not any(kw in output.lower() for kw in negatives):
             return output
         return semantic_brewery_search(query)
     except Exception:
         return semantic_brewery_search(query)
 
 tools = [drink_database_tool, semantic_brewery_search]
-
 tool_calling_template = """
 You are BrewBot for Wellsville Brewing Company.
-
 Rules:
-1) For 'what beer has the highest ABV?', always use:
-   SELECT name, abv FROM drinks WHERE type ILIKE 'beer' AND abv IS NOT NULL ORDER BY abv DESC LIMIT 1
-   Your answer must always be a beer, never a cider, seltzer, or other type, even if those have a higher ABV.
-
-2) For 'what cider has the highest ABV?', same logic with type ILIKE 'cider'.
-
-3) For overall ('what drink has the highest ABV?'), omit type filter:
-   SELECT name, abv FROM drinks WHERE abv IS NOT NULL ORDER BY abv DESC LIMIT 1
-
-4) If the request is for beers, output must always be a beer, even if another drink has a higher ABV. 
-   This rule applies for ciders, seltzers, etc. Never substitute types.
-
-5) For counting drinks:
-   - 'How many beers' → SELECT COUNT(*) FROM drinks WHERE type ILIKE 'beer'
-   - 'How many drinks' → SELECT COUNT(*) FROM drinks
-
+1) For highest/lowest ABV or IBU:
+- If type is specified (e.g. beer, cider), filter with WHERE type ILIKE '' and ORDER BY abv/ibu.
+- If no type is specified, search all drinks.
+2) Use ILIKE for all type filtering, never '=' or LIKE.
+3) Result for a type (beer, cider, etc.) must always be of that type!
+4) For "how many drinks", count all records in 'drinks'.
+5) For "how many beers/ciders/seltzers", count WHERE type ILIKE ''.
 6) Never ask for table name; it's always 'drinks'.
-
 7) If SQL cannot answer, fallback to semantic_brewery_search.
-
 Question: {input}
 Scratchpad:
 {agent_scratchpad}
 """.strip()
-
 tc_prompt = ChatPromptTemplate.from_template(tool_calling_template)
-
 supervisor_agent = create_tool_calling_agent(llm, tools, tc_prompt)
 supervisor_agent_executor = AgentExecutor(
     agent=supervisor_agent,
@@ -231,7 +216,6 @@ def process_prompt(user_prompt: str) -> None:
 
 st.title("Wellsville Brewing Info BrewBot 🍺")
 st.sidebar.title("Controls")
-
 if st.sidebar.button("Restart Chat"):
     st.session_state.clear()
     st.rerun()
