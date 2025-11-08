@@ -60,20 +60,22 @@ def init_vector_store(model_name: str = "intfloat/e5-base") -> PineconeVectorSto
 
 def init_sql_db() -> SQLDatabase:
     custom_table_info = {
-        "drinks": """
+        "drinks": '''
         This table contains all drinks: beers, ciders, seltzers, etc.
-        The table name is always 'drinks'.
+        The table name is always "drinks".
         Columns: id, gluten_free, description, ibu, abv, style, type, name.
         - To count ALL drinks: SELECT COUNT(*) FROM drinks
         - To count beers: SELECT COUNT(*) FROM drinks WHERE type ILIKE 'beer'
         - To count ciders: SELECT COUNT(*) FROM drinks WHERE type ILIKE 'cider'
         - To count seltzers: SELECT COUNT(*) FROM drinks WHERE type ILIKE 'seltzer'
+        - For highest ABV for beers: SELECT name, abv FROM drinks WHERE type ILIKE 'beer' ORDER BY abv DESC LIMIT 1
+        - For highest ABV for ciders: SELECT name, abv FROM drinks WHERE type ILIKE 'cider' ORDER BY abv DESC LIMIT 1
+        - For highest ABV for seltzers: SELECT name, abv FROM drinks WHERE type ILIKE 'seltzer' ORDER BY abv DESC LIMIT 1
         - For highest ABV overall: SELECT name, abv FROM drinks ORDER BY abv DESC LIMIT 1
-        - For highest ABV of a type: SELECT name, abv FROM drinks WHERE type ILIKE '<type>' ORDER BY abv DESC LIMIT 1
+        - For highest IBU for beers: SELECT name, ibu FROM drinks WHERE type ILIKE 'beer' ORDER BY ibu DESC LIMIT 1
         - For highest IBU overall: SELECT name, ibu FROM drinks ORDER BY ibu DESC LIMIT 1
-        - For highest IBU of a type: SELECT name, ibu FROM drinks WHERE type ILIKE '<type>' ORDER BY ibu DESC LIMIT 1
-        Always use ILIKE for type filtering; never ask the user for table name.
-        """
+        Use ILIKE for all type filtering. If a type is not specified, query all drinks.
+        '''
     }
     uri = (
         f"postgresql://{require_env('SUPABASE_DB_USER')}:{require_env('SUPABASE_DB_PASSWORD')}"
@@ -173,14 +175,14 @@ tool_calling_template = """
 You are BrewBot for Wellsville Brewing Company.
 
 Rules:
-1) For 'how many drinks', count all records in 'drinks'.
-2) For 'how many beers/ciders/seltzers', use WHERE type ILIKE '<type>' in your counting queries.
-3) For 'highest/lowest ABV' or 'highest/lowest IBU':
-   - If no type specified, use ORDER BY abv/ibu on all drinks.
-   - If type specified, use WHERE type ILIKE '<type>' and ORDER BY abv/ibu.
-4) Use ILIKE for type comparisons, never '=' or LIKE.
+1) For highest/lowest ABV or IBU: 
+  - If type is specified (e.g. beer, cider), filter with WHERE type ILIKE '<type>' and ORDER BY abv/ibu.
+  - If no type is specified, search all drinks.
+2) Use ILIKE for all type filtering, never '=' or LIKE.
+3) For "how many drinks", count all records in 'drinks'.
+4) For "how many beers/ciders/seltzers", count WHERE type ILIKE '<type>'.
 5) Never ask for table name; it's always 'drinks'.
-6) If SQL does not give a useful answer, fallback to semantic_brewery_search.
+6) If SQL cannot answer, fallback to semantic_brewery_search.
 
 Question: {input}
 Scratchpad:
@@ -244,7 +246,6 @@ if len(st.session_state.messages) == 1:
         "The Business 🏢": ["Tell me about the brewery", "Who are the owners?"],
         "Hours & Location 🕒": ["What are your hours?", "Where are you located?"],
         "The Brews 🍻": [
-            "How many drinks do you offer?",
             "How many beers do you offer?",
             "How many ciders do you offer?",
             "What beer has the highest ABV?",
