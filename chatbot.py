@@ -189,6 +189,8 @@ Rules:
 3) For general brewery questions or subjective recommendations, use semantic_brewery_search.
 
 Question: {input}
+Scratchpad:
+{agent_scratchpad}
 """.strip()
 
 tc_prompt = ChatPromptTemplate.from_template(tool_calling_template)
